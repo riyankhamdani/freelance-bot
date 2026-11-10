@@ -34,9 +34,10 @@ jobs:
         run: |
           python agent.py
 
-      - name: Persist seen_urls state
+     - name: Persist seen_urls state
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
           git add seen_urls.json
-          git diff --staged --quiet || (git commit -m "chore: persist seen_urls state [skip ci]" && git push)
+          git diff --staged --quiet || (git commit -m "chore: persist seen_urls state [skip ci]" && git push origin main)
