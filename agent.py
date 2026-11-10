@@ -2,7 +2,7 @@ import html
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 import requests
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -13,24 +13,35 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 }
 
-# Skill mapping spesifik sesuai profil CV Riyan Khamdani
+# Role WAJIB di Judul / First Line (Anti-Sales & Anti-Software Dev Murni)
+INFRA_ROLE_REGEX = re.compile(
+    r"\b(devops|sre|site reliability|platform engineer|infrastructure|infra|kubernetes|k8s|cloud engineer|cloud architect|systems engineer|sysadmin|openshift|ceph)\b",
+    re.IGNORECASE
+)
+
+# Blacklist role non-infra (Sales, BD, Compiler, Frontend, dll)
+EXCLUDE_ROLES_REGEX = re.compile(
+    r"\b(business development|sales|account executive|marketing|recruiter|product manager|frontend|react|mobile|ios|android|designer|ui/ux|llvm|fuzzing|commission-only|equity only|unpaid)\b",
+    re.IGNORECASE
+)
+
+# Blacklist regional tertutup (US-only, EU-only, UK-only, dll)
+GEO_EXCLUDE_REGEX = re.compile(
+    r"\b(remote\s*\((?:us|usa|u\.s\.|uk|eu|europe|canada|india|emea|latam|americas|na)\)|us\s+only|usa\s+only|uk\s+only|eu\s+only|canada\s+only|must be in (?:us|usa|uk|eu)|us citizens? only)\b",
+    re.IGNORECASE
+)
+
+# Skill mapping spesifik CV Riyan Khamdani
 PROFILE_KEYWORDS = {
     "OpenShift / K8s": ["openshift", "kubernetes", "k8s", "gke", "podman"],
     "IaC & Automation": ["terraform", "ansible"],
     "Cloud & Linux": ["aws", "gcp", "google cloud", "alibaba cloud", "rhel", "linux"],
     "Virtualization": ["vmware", "vsphere", "nsx-t", "zerto"],
-    "AI Infra / SRE": ["llm", "ai platform", "dataiku", "sre", "platform engineer", "devops"]
+    "AI Infra / SRE": ["ai platform", "dataiku", "mlops", "gpu infrastructure", "platform engineer", "sre", "devops"]
 }
 
-# Wajib format kontrak murni
 CONTRACT_REGEX = re.compile(
     r"\b(contract|contractor|freelance|freelancer|b2b|c2c|hourly|retainer|part-time|1099)\b", 
-    re.IGNORECASE
-)
-
-# Blacklist onsite, hybrid, full-time murni, clearance, dan pembatasan region tertutup
-EXCLUDE_REGEX = re.compile(
-    r"\b(onsite|on-site|hybrid|in-office|w2 only|security clearance|polygraph|us citizenship required|us citizen only|remote \(india\)|remote \(us only\))\b",
     re.IGNORECASE
 )
 
@@ -80,17 +91,29 @@ def extract_matched_skills(text: str) -> list:
     return matched
 
 
-def is_valid_contract(text: str) -> bool:
-    if EXCLUDE_REGEX.search(text):
+def is_valid_contract_and_geo(header_or_title: str, full_text: str) -> bool:
+    # 1. Cek blacklist regional (US/EU/UK only)
+    if GEO_EXCLUDE_REGEX.search(header_or_title) or GEO_EXCLUDE_REGEX.search(full_text[:300]):
         return False
-    # Jika full-time tapi tidak ada kata kontrak eksplisit, drop
-    if re.search(r"\bfull-time\b|\bfull time\b", text, re.I) and not CONTRACT_REGEX.search(text):
+
+    # 2. Cek blacklist role (BD, Sales, LLVM, Commission-only)
+    if EXCLUDE_ROLES_REGEX.search(header_or_title) or EXCLUDE_ROLES_REGEX.search(full_text[:300]):
         return False
-    return bool(CONTRACT_REGEX.search(text))
+
+    # 3. Wajib ada role infra di header/title
+    if not INFRA_ROLE_REGEX.search(header_or_title) and not INFRA_ROLE_REGEX.search(full_text[:200]):
+        return False
+
+    # 4. Filter Full-time murni
+    if re.search(r"\bfull-time\b|\bfull time\b", header_or_title, re.I):
+        if not CONTRACT_REGEX.search(header_or_title) and not CONTRACT_REGEX.search(full_text[:300]):
+            return False
+
+    # 5. Wajib ada istilah kontrak/freelance
+    return bool(CONTRACT_REGEX.search(header_or_title) or CONTRACT_REGEX.search(full_text))
 
 
 def fetch_hn_contracts() -> list:
-    """100% Gratis: Direct contact founder/CTO dari Hacker News thread bulan berjalan."""
     jobs = []
     try:
         url = "https://hn.algolia.com/api/v1/search_by_date?tags=story,author_whoishiring&hitsPerPage=6"
@@ -104,7 +127,7 @@ def fetch_hn_contracts() -> list:
 
         for story in target_stories[:2]:
             story_id = story["objectID"]
-            comments_url = f"https://hn.algolia.com/api/v1/search?tags=comment,story_{story_id}&hitsPerPage=100"
+            comments_url = f"https://hn.algolia.com/api/v1/search?tags=comment,story_{story_id}&hitsPerPage=150"
             comments_res = requests.get(comments_url, headers=HEADERS, timeout=15).json()
 
             for hit in comments_res.get("hits", []):
@@ -115,30 +138,32 @@ def fetch_hn_contracts() -> list:
                 if "SEEKING WORK" in upper:
                     continue
 
-                first_lines = " ".join(clean_text.splitlines()[:3]).upper()
-                if "ONSITE" in first_lines or "HYBRID" in first_lines:
+                lines = [line.strip() for line in clean_text.splitlines() if line.strip()]
+                first_line = lines[0] if lines else clean_text[:120]
+
+                if "ONSITE" in first_line.upper() or "HYBRID" in first_line.upper():
                     continue
 
-                matched_skills = extract_matched_skills(clean_text)
-                if matched_skills and is_valid_contract(clean_text):
-                    snippet = clean_text[:140].replace("\n", " ") + "..."
-                    jobs.append({
-                        "source": "HackerNews (Direct Founder)",
-                        "title": snippet,
-                        "company": hit.get("author", "HN Client"),
-                        "url": f"https://news.ycombinator.com/item?id={hit.get('objectID')}",
-                        "date": hit.get("created_at", "")[:10],
-                        "matches": matched_skills
-                    })
+                if is_valid_contract_and_geo(first_line, clean_text):
+                    matched_skills = extract_matched_skills(clean_text)
+                    if matched_skills:
+                        snippet = clean_text[:140].replace("\n", " ") + "..."
+                        jobs.append({
+                            "source": "HackerNews (Direct Founder)",
+                            "title": snippet,
+                            "company": hit.get("author", "HN Client"),
+                            "url": f"https://news.ycombinator.com/item?id={hit.get('objectID')}",
+                            "date": hit.get("created_at", "")[:10],
+                            "matches": matched_skills
+                        })
     except Exception as e:
         print(f"[-] HN error: {e}")
 
-    print(f"[*] HN kontrak murni lolos: {len(jobs)} listing")
+    print(f"[*] HN kontrak global valid: {len(jobs)} listing")
     return jobs
 
 
 def fetch_jobicy_contracts() -> list:
-    """100% Gratis: Direct ATS apply (Greenhouse/Lever) khusus lowongan kontrak/freelance."""
     jobs = []
     try:
         url = "https://jobicy.com/api/v2/remote-jobs?count=50&tag=devops"
@@ -148,13 +173,13 @@ def fetch_jobicy_contracts() -> list:
             title = item.get("jobTitle", "")
             desc = item.get("jobDescription", "")
             geo = item.get("jobGeo", "").lower()
-            combined = f"{title} {desc} {job_type} {geo}"
+            header_meta = f"{title} | {geo} | {job_type}"
 
-            if "full-time" in job_type:
+            if "full-time" in job_type and not CONTRACT_REGEX.search(title):
                 continue
 
-            if ("contract" in job_type or "freelance" in job_type or CONTRACT_REGEX.search(title)) and not EXCLUDE_REGEX.search(combined):
-                matched = extract_matched_skills(combined)
+            if is_valid_contract_and_geo(header_meta, desc):
+                matched = extract_matched_skills(f"{title} {desc}")
                 if matched:
                     jobs.append({
                         "source": "Jobicy (Direct ATS)",
@@ -167,7 +192,7 @@ def fetch_jobicy_contracts() -> list:
     except Exception as e:
         print(f"[-] Jobicy error: {e}")
 
-    print(f"[*] Jobicy kontrak lolos: {len(jobs)} listing")
+    print(f"[*] Jobicy kontrak global valid: {len(jobs)} listing")
     return jobs
 
 
@@ -180,17 +205,17 @@ def main():
     all_jobs.extend(fetch_jobicy_contracts())
 
     new_jobs = [job for job in all_jobs if job["url"] not in seen_urls]
-    print(f"[*] Total lolos kurasi: {len(all_jobs)}, listing baru: {len(new_jobs)}")
+    print(f"[*] Total lolos kurasi ketat: {len(all_jobs)}, listing baru: {len(new_jobs)}")
 
     if not new_jobs:
-        print("[!] Tidak ada proyek kontrak/freelance baru yang lolos kurasi. Bot standby.")
+        print("[!] Tidak ada proyek kontrak global murni yang lolos kurasi. Bot standby.")
         return
 
     top_jobs = new_jobs[:5]
 
     message = (
-        "<b>⚡ STRICT FREELANCE & CONTRACT RADAR</b>\n"
-        "<i>Filter: OpenShift, K8s, Terraform, Multi-Cloud (100% Free Apply & Direct)</i>\n"
+        "<b>⚡ GLOBAL FREELANCE & CONTRACT RADAR</b>\n"
+        "<i>Role: DevOps, SRE, K8s, Cloud Infra (No Sales, No US-Only, 100% Free Apply)</i>\n"
         "====================================\n\n"
     )
 
