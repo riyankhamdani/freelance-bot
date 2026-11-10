@@ -34,7 +34,7 @@ GEO_EXCLUDE_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# Skill mapping spesifik CV Riyan Khamdani
+# Skill mapping profil CV Riyan Khamdani
 PROFILE_KEYWORDS = {
     "OpenShift / K8s": ["openshift", "kubernetes", "k8s", "gke", "podman"],
     "IaC & Automation": ["terraform", "ansible"],
@@ -43,7 +43,7 @@ PROFILE_KEYWORDS = {
     "AI Infra / SRE": ["ai platform", "dataiku", "mlops", "gpu infrastructure", "platform engineer", "sre", "devops"]
 }
 
-# Wajib term kontrak
+# Pola deteksi kontrak murni
 CONTRACT_REGEX = re.compile(
     r"(?<!smart\s)(?<!federal\s)(?<!government\s)\b(contract|contractor|freelance|freelancer|b2b|c2c|hourly|retainer|part-time|1099)\b", 
     re.IGNORECASE
@@ -51,7 +51,6 @@ CONTRACT_REGEX = re.compile(
 
 
 def normalize_to_str(val) -> str:
-    """Mengubah nilai bertipe list, dict, atau string menjadi string flat lowercase yang aman."""
     if isinstance(val, list):
         return " ".join(str(item) for item in val).lower()
     return str(val or "").lower()
@@ -105,30 +104,32 @@ def extract_matched_skills(text: str) -> list:
 def is_valid_contract_and_geo(header_or_title: str, full_text: str) -> bool:
     first_block = f"{header_or_title} {full_text[:350]}"
 
-    # 1. Buang semua format full-time
+    # Drop lowongan Full-time
     if re.search(r"\bfull[\s-]time\b", first_block, re.IGNORECASE):
         return False
 
-    # 2. Cek blacklist regional tertutup
+    # Drop batasan regional tertutup
     if GEO_EXCLUDE_REGEX.search(first_block):
         return False
 
-    # 3. Cek blacklist role bukan infra
+    # Drop non-infra
     if EXCLUDE_ROLES_REGEX.search(first_block):
         return False
 
-    # 4. Wajib role infra
+    # Wajib role infra
     if not INFRA_ROLE_REGEX.search(header_or_title) and not INFRA_ROLE_REGEX.search(full_text[:200]):
         return False
 
-    # 5. Wajib ada term kontrak/freelance murni
+    # Wajib format kontrak murni
     return bool(CONTRACT_REGEX.search(first_block) or CONTRACT_REGEX.search(full_text))
 
 
 def fetch_hn_contracts() -> list:
+    """Scan thread Who is Hiring & Seeking Freelancer dengan targeted deep search."""
     jobs = []
     try:
-        url = "https://hn.algolia.com/api/v1/search_by_date?tags=story,author_whoishiring&hitsPerPage=6"
+        # Ambil story resmi whoishiring dari 2 bulan terakhir
+        url = "https://hn.algolia.com/api/v1/search_by_date?tags=story,author_whoishiring&hitsPerPage=10"
         res = requests.get(url, headers=HEADERS, timeout=15).json()
         hits = res.get("hits", [])
         
@@ -137,12 +138,22 @@ def fetch_hn_contracts() -> list:
             if "hiring" in h.get("title", "").lower() or "freelancer" in h.get("title", "").lower()
         ]
 
-        for story in target_stories[:2]:
+        # Scan hingga 4 thread aktif
+        for story in target_stories[:4]:
             story_id = story["objectID"]
-            comments_url = f"https://hn.algolia.com/api/v1/search?tags=comment,story_{story_id}&hitsPerPage=150"
+            
+            # Query langsung keyword infra ke seluruh isi komentar thread (maks 1000 hits)
+            query_str = "devops OR kubernetes OR terraform OR sre OR infrastructure"
+            comments_url = (
+                f"https://hn.algolia.com/api/v1/search"
+                f"?tags=comment,story_{story_id}"
+                f"&query={requests.utils.quote(query_str)}"
+                f"&hitsPerPage=1000"
+            )
             comments_res = requests.get(comments_url, headers=HEADERS, timeout=15).json()
+            comment_hits = comments_res.get("hits", [])
 
-            for hit in comments_res.get("hits", []):
+            for hit in comment_hits:
                 raw_html = hit.get("comment_text", "")
                 text = html.unescape(raw_html)
                 text_with_newlines = re.sub(r"</?p>", "\n", text)
@@ -178,6 +189,7 @@ def fetch_hn_contracts() -> list:
 
 
 def fetch_jobicy_contracts() -> list:
+    """Mengambil listing devops dari Jobicy yang murni kontrak dan global."""
     jobs = []
     try:
         url = "https://jobicy.com/api/v2/remote-jobs?count=50&tag=devops"
@@ -192,6 +204,7 @@ def fetch_jobicy_contracts() -> list:
             if "full-time" in job_type or "full time" in job_type:
                 continue
 
+            # Abaikan jika ada pembatasan regional tertentu
             if geo and not any(term in geo for term in ["anywhere", "worldwide", "global", "all"]):
                 continue
 
