@@ -13,21 +13,24 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 }
 
-# Role WAJIB di Judul / First Line (Anti-Sales & Anti-Software Dev Murni)
+# Role WAJIB di Judul / Header baris pertama
 INFRA_ROLE_REGEX = re.compile(
     r"\b(devops|sre|site reliability|platform engineer|infrastructure|infra|kubernetes|k8s|cloud engineer|cloud architect|systems engineer|sysadmin|openshift|ceph)\b",
     re.IGNORECASE
 )
 
-# Blacklist role non-infra (Sales, BD, Compiler, Frontend, dll)
+# Blacklist role non-infra
 EXCLUDE_ROLES_REGEX = re.compile(
     r"\b(business development|sales|account executive|marketing|recruiter|product manager|frontend|react|mobile|ios|android|designer|ui/ux|llvm|fuzzing|commission-only|equity only|unpaid)\b",
     re.IGNORECASE
 )
 
-# Blacklist regional tertutup (US-only, EU-only, UK-only, dll)
+# Blacklist regional tertutup (US, UK, EU, Canada, India, dll)
 GEO_EXCLUDE_REGEX = re.compile(
-    r"\b(remote\s*\((?:us|usa|u\.s\.|uk|eu|europe|canada|india|emea|latam|americas|na)\)|us\s+only|usa\s+only|uk\s+only|eu\s+only|canada\s+only|must be in (?:us|usa|uk|eu)|us citizens? only)\b",
+    r"(?:remote\s*[-–(:]\s*(?:us|usa|u\.s\.|uk|eu|europe|canada|india|emea|latam|americas|uk\s+or\s+eu|eu\s+or\s+uk)[^)\n]*\)?|"
+    r"\b(?:us|usa|uk|eu|canada|india)\s+only\b|"
+    r"\b(?:us|usa|uk|eu)\s+citizens?\b|"
+    r"\bbased\s+in\s+(?:the\s+)?(?:us|usa|uk|eu|europe)\b)",
     re.IGNORECASE
 )
 
@@ -40,8 +43,9 @@ PROFILE_KEYWORDS = {
     "AI Infra / SRE": ["ai platform", "dataiku", "mlops", "gpu infrastructure", "platform engineer", "sre", "devops"]
 }
 
+# Wajib term kontrak (hindari 'smart contract' atau 'federal contract')
 CONTRACT_REGEX = re.compile(
-    r"\b(contract|contractor|freelance|freelancer|b2b|c2c|hourly|retainer|part-time|1099)\b", 
+    r"(?<!smart\s)(?<!federal\s)(?<!government\s)\b(contract|contractor|freelance|freelancer|b2b|c2c|hourly|retainer|part-time|1099)\b", 
     re.IGNORECASE
 )
 
@@ -92,25 +96,26 @@ def extract_matched_skills(text: str) -> list:
 
 
 def is_valid_contract_and_geo(header_or_title: str, full_text: str) -> bool:
-    # 1. Cek blacklist regional (US/EU/UK only)
-    if GEO_EXCLUDE_REGEX.search(header_or_title) or GEO_EXCLUDE_REGEX.search(full_text[:300]):
+    first_block = f"{header_or_title} {full_text[:350]}"
+
+    # 1. Wajib buang semua yang bertuliskan Full-Time
+    if re.search(r"\bfull[\s-]time\b", first_block, re.IGNORECASE):
         return False
 
-    # 2. Cek blacklist role (BD, Sales, LLVM, Commission-only)
-    if EXCLUDE_ROLES_REGEX.search(header_or_title) or EXCLUDE_ROLES_REGEX.search(full_text[:300]):
+    # 2. Cek blacklist lokasi tertutup (US, UK, EU, dll)
+    if GEO_EXCLUDE_REGEX.search(first_block):
         return False
 
-    # 3. Wajib ada role infra di header/title
+    # 3. Cek blacklist role
+    if EXCLUDE_ROLES_REGEX.search(first_block):
+        return False
+
+    # 4. Wajib role infra
     if not INFRA_ROLE_REGEX.search(header_or_title) and not INFRA_ROLE_REGEX.search(full_text[:200]):
         return False
 
-    # 4. Filter Full-time murni
-    if re.search(r"\bfull-time\b|\bfull time\b", header_or_title, re.I):
-        if not CONTRACT_REGEX.search(header_or_title) and not CONTRACT_REGEX.search(full_text[:300]):
-            return False
-
-    # 5. Wajib ada istilah kontrak/freelance
-    return bool(CONTRACT_REGEX.search(header_or_title) or CONTRACT_REGEX.search(full_text))
+    # 5. Wajib ada kata kontrak/freelance murni
+    return bool(CONTRACT_REGEX.search(first_block) or CONTRACT_REGEX.search(full_text))
 
 
 def fetch_hn_contracts() -> list:
@@ -131,8 +136,11 @@ def fetch_hn_contracts() -> list:
             comments_res = requests.get(comments_url, headers=HEADERS, timeout=15).json()
 
             for hit in comments_res.get("hits", []):
-                text = html.unescape(hit.get("comment_text", ""))
-                clean_text = re.sub(r"<[^>]+>", " ", text).strip()
+                raw_html = hit.get("comment_text", "")
+                text = html.unescape(raw_html)
+                # Ubah tag <p> jadi newline agar baris header tetap terbaca rapi
+                text_with_newlines = re.sub(r"</?p>", "\n", text)
+                clean_text = re.sub(r"<[^>]+>", " ", text_with_newlines).strip()
                 upper = clean_text.upper()
 
                 if "SEEKING WORK" in upper:
@@ -175,7 +183,12 @@ def fetch_jobicy_contracts() -> list:
             geo = item.get("jobGeo", "").lower()
             header_meta = f"{title} | {geo} | {job_type}"
 
-            if "full-time" in job_type and not CONTRACT_REGEX.search(title):
+            # Tolak lowongan full-time
+            if "full-time" in job_type or "full time" in job_type:
+                continue
+
+            # Abaikan jika region terkunci dan bukan global/anywhere/worldwide
+            if geo and not any(term in geo for term in ["anywhere", "worldwide", "global", "all"]):
                 continue
 
             if is_valid_contract_and_geo(header_meta, desc):
@@ -214,8 +227,8 @@ def main():
     top_jobs = new_jobs[:5]
 
     message = (
-        "<b>⚡ GLOBAL FREELANCE & CONTRACT RADAR</b>\n"
-        "<i>Role: DevOps, SRE, K8s, Cloud Infra (No Sales, No US-Only, 100% Free Apply)</i>\n"
+        "<b>⚡ STRICT GLOBAL FREELANCE / CONTRACT RADAR</b>\n"
+        "<i>Role: DevOps, SRE, K8s, Cloud (Strict Remote Worldwide & Contract Only)</i>\n"
         "====================================\n\n"
     )
 
