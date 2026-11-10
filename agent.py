@@ -2,8 +2,7 @@ import html
 import json
 import os
 import re
-from datetime import datetime
-import feedparser
+from datetime import datetime, timezone
 import requests
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -14,7 +13,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 }
 
-# Skill mapping spesifik sesuai CV (Riyan Khamdani)
+# Skill mapping spesifik sesuai profil CV Riyan Khamdani
 PROFILE_KEYWORDS = {
     "OpenShift / K8s": ["openshift", "kubernetes", "k8s", "gke", "podman"],
     "IaC & Automation": ["terraform", "ansible"],
@@ -23,12 +22,17 @@ PROFILE_KEYWORDS = {
     "AI Infra / SRE": ["llm", "ai platform", "dataiku", "sre", "platform engineer", "devops"]
 }
 
-FLATTENED_KEYWORDS = [kw for group in PROFILE_KEYWORDS.values() for kw in group]
+# Wajib format kontrak murni
+CONTRACT_REGEX = re.compile(
+    r"\b(contract|contractor|freelance|freelancer|b2b|c2c|hourly|retainer|part-time|1099)\b", 
+    re.IGNORECASE
+)
 
-STRICT_CONTRACT_TERMS = [
-    "contract", "contractor", "freelance", "hourly", 
-    "retainer", "b2b", "consultant", "consulting", "part-time"
-]
+# Blacklist onsite, hybrid, full-time murni, clearance, dan pembatasan region tertutup
+EXCLUDE_REGEX = re.compile(
+    r"\b(onsite|on-site|hybrid|in-office|w2 only|security clearance|polygraph|us citizenship required|us citizen only|remote \(india\)|remote \(us only\))\b",
+    re.IGNORECASE
+)
 
 
 def load_seen_urls() -> set:
@@ -67,11 +71,6 @@ def send_telegram_message(text: str):
         print(f"[!] Error Telegram API: {e}")
 
 
-def is_contract(text: str) -> bool:
-    lower = text.lower()
-    return any(term in lower for term in STRICT_CONTRACT_TERMS)
-
-
 def extract_matched_skills(text: str) -> list:
     lower = text.lower()
     matched = []
@@ -81,24 +80,30 @@ def extract_matched_skills(text: str) -> list:
     return matched
 
 
-def fetch_hn_contracts() -> list:
-    jobs = []
-    queries = ["Seeking Freelancer", "Who is hiring"]
-    
-    for q in queries:
-        try:
-            search_url = (
-                f"https://hn.algolia.com/api/v1/search_by_date"
-                f"?tags=story,author_whoishiring"
-                f"&query={requests.utils.quote(q)}"
-                f"&hitsPerPage=2"
-            )
-            res = requests.get(search_url, headers=HEADERS, timeout=15).json()
-            hits = res.get("hits", [])
-            if not hits:
-                continue
+def is_valid_contract(text: str) -> bool:
+    if EXCLUDE_REGEX.search(text):
+        return False
+    # Jika full-time tapi tidak ada kata kontrak eksplisit, drop
+    if re.search(r"\bfull-time\b|\bfull time\b", text, re.I) and not CONTRACT_REGEX.search(text):
+        return False
+    return bool(CONTRACT_REGEX.search(text))
 
-            story_id = hits[0]["objectID"]
+
+def fetch_hn_contracts() -> list:
+    """100% Gratis: Direct contact founder/CTO dari Hacker News thread bulan berjalan."""
+    jobs = []
+    try:
+        url = "https://hn.algolia.com/api/v1/search_by_date?tags=story,author_whoishiring&hitsPerPage=6"
+        res = requests.get(url, headers=HEADERS, timeout=15).json()
+        hits = res.get("hits", [])
+        
+        target_stories = [
+            h for h in hits 
+            if "hiring" in h.get("title", "").lower() or "freelancer" in h.get("title", "").lower()
+        ]
+
+        for story in target_stories[:2]:
+            story_id = story["objectID"]
             comments_url = f"https://hn.algolia.com/api/v1/search?tags=comment,story_{story_id}&hitsPerPage=100"
             comments_res = requests.get(comments_url, headers=HEADERS, timeout=15).json()
 
@@ -110,86 +115,59 @@ def fetch_hn_contracts() -> list:
                 if "SEEKING WORK" in upper:
                     continue
 
+                first_lines = " ".join(clean_text.splitlines()[:3]).upper()
+                if "ONSITE" in first_lines or "HYBRID" in first_lines:
+                    continue
+
                 matched_skills = extract_matched_skills(clean_text)
-                if matched_skills and is_contract(clean_text):
+                if matched_skills and is_valid_contract(clean_text):
                     snippet = clean_text[:140].replace("\n", " ") + "..."
-                    comment_id = hit.get("objectID")
                     jobs.append({
-                        "source": "HackerNews (Direct)",
+                        "source": "HackerNews (Direct Founder)",
                         "title": snippet,
                         "company": hit.get("author", "HN Client"),
-                        "url": f"https://news.ycombinator.com/item?id={comment_id}",
+                        "url": f"https://news.ycombinator.com/item?id={hit.get('objectID')}",
                         "date": hit.get("created_at", "")[:10],
                         "matches": matched_skills
                     })
-        except Exception as e:
-            print(f"[-] HN ({q}) error: {e}")
+    except Exception as e:
+        print(f"[-] HN error: {e}")
 
-    print(f"[*] HN kontrak cocok CV: {len(jobs)} listing")
+    print(f"[*] HN kontrak murni lolos: {len(jobs)} listing")
     return jobs
 
 
 def fetch_jobicy_contracts() -> list:
+    """100% Gratis: Direct ATS apply (Greenhouse/Lever) khusus lowongan kontrak/freelance."""
     jobs = []
     try:
         url = "https://jobicy.com/api/v2/remote-jobs?count=50&tag=devops"
         res = requests.get(url, headers=HEADERS, timeout=15).json()
-        job_list = res.get("jobs", [])
-
-        for item in job_list:
+        for item in res.get("jobs", []):
+            job_type = item.get("jobType", "").lower()
             title = item.get("jobTitle", "")
             desc = item.get("jobDescription", "")
-            job_type = item.get("jobType", "").lower()
-            combined = f"{title} {desc} {job_type}"
+            geo = item.get("jobGeo", "").lower()
+            combined = f"{title} {desc} {job_type} {geo}"
 
-            if "full-time" in job_type and not is_contract(combined):
+            if "full-time" in job_type:
                 continue
 
-            matched_skills = extract_matched_skills(combined)
-            if matched_skills and (is_contract(job_type) or is_contract(combined)):
-                jobs.append({
-                    "source": "Jobicy (Contract)",
-                    "title": title.strip(),
-                    "company": item.get("companyName", "Tech Company").strip(),
-                    "url": item.get("url"),
-                    "date": item.get("pubDate", "")[:10],
-                    "matches": matched_skills
-                })
+            if ("contract" in job_type or "freelance" in job_type or CONTRACT_REGEX.search(title)) and not EXCLUDE_REGEX.search(combined):
+                matched = extract_matched_skills(combined)
+                if matched:
+                    jobs.append({
+                        "source": "Jobicy (Direct ATS)",
+                        "title": title.strip(),
+                        "company": item.get("companyName", "Tech Company").strip(),
+                        "url": item.get("url"),
+                        "date": item.get("pubDate", "")[:10],
+                        "matches": matched
+                    })
     except Exception as e:
         print(f"[-] Jobicy error: {e}")
 
-    print(f"[*] Jobicy kontrak cocok CV: {len(jobs)} listing")
-    return jobs
-
-
-def fetch_wwr_contracts() -> list:
-    jobs = []
-    try:
-        feed = feedparser.parse("https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss")
-        for entry in feed.entries:
-            title = entry.title
-            summary = getattr(entry, "summary", "")
-            combined = f"{title} {summary}"
-
-            matched_skills = extract_matched_skills(combined)
-            if matched_skills and is_contract(combined):
-                pub_date = (
-                    datetime(*entry.published_parsed[:3]).strftime("%Y-%m-%d")
-                    if hasattr(entry, "published_parsed")
-                    else "Recent"
-                )
-                jobs.append({
-                    "source": "WWR (Contract)",
-                    "title": title.strip(),
-                    "company": getattr(entry, "author", "Company"),
-                    "url": entry.link,
-                    "date": pub_date,
-                    "matches": matched_skills
-                })
-    except Exception as e:
-        print(f"[-] WWR error: {e}")
-
-    print(f"[*] WWR kontrak cocok CV: {len(jobs)} listing")
+    print(f"[*] Jobicy kontrak lolos: {len(jobs)} listing")
     return jobs
 
 
@@ -200,20 +178,19 @@ def main():
     all_jobs = []
     all_jobs.extend(fetch_hn_contracts())
     all_jobs.extend(fetch_jobicy_contracts())
-    all_jobs.extend(fetch_wwr_contracts())
 
     new_jobs = [job for job in all_jobs if job["url"] not in seen_urls]
-    print(f"[*] Total listing cocok CV: {len(all_jobs)}, listing baru: {len(new_jobs)}")
+    print(f"[*] Total lolos kurasi: {len(all_jobs)}, listing baru: {len(new_jobs)}")
 
     if not new_jobs:
-        print("[!] Tidak ada proyek kontrak baru yang cocok dengan CV saat ini.")
+        print("[!] Tidak ada proyek kontrak/freelance baru yang lolos kurasi. Bot standby.")
         return
 
     top_jobs = new_jobs[:5]
 
     message = (
-        "<b>🎯 RIYAN'S FREELANCE & CONTRACT RADAR</b>\n"
-        "<i>Filter: OpenShift, K8s, Terraform, Multi-Cloud, AI Ops (Contract/B2B Only)</i>\n"
+        "<b>⚡ STRICT FREELANCE & CONTRACT RADAR</b>\n"
+        "<i>Filter: OpenShift, K8s, Terraform, Multi-Cloud (100% Free Apply & Direct)</i>\n"
         "====================================\n\n"
     )
 
@@ -230,7 +207,7 @@ def main():
 
     send_telegram_message(message)
     save_seen_urls(seen_urls)
-    print(f"[✓] Berhasil mengirim {len(top_jobs)} peluang relevan ke Telegram.")
+    print(f"[✓] Berhasil mengirim {len(top_jobs)} listing valid ke Telegram.")
 
 
 if __name__ == "__main__":
