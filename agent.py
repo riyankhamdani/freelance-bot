@@ -31,7 +31,6 @@ def load_seen_urls() -> set:
 
 
 def save_seen_urls(seen_urls: set):
-    # Simpan maksimal 2000 URL terakhir agar file tidak membengkak
     urls_to_save = list(seen_urls)[-2000:]
     with open(STATE_FILE, "w") as f:
         json.dump(urls_to_save, f, indent=2)
@@ -110,27 +109,52 @@ def fetch_wwr() -> list:
 def fetch_hn_freelance() -> list:
     jobs = []
     try:
-        search_url = "https://hn.algolia.com/api/v1/search?query=Ask%20HN%20Seeking%20Freelancer&tags=story&hitsPerPage=1"
+        # Gunakan search_by_date agar mengambil thread bulan terbaru
+        search_url = (
+            "https://hn.algolia.com/api/v1/search_by_date"
+            "?query=Ask%20HN%20Seeking%20Freelancer"
+            "&tags=story"
+            "&hitsPerPage=10"
+        )
         res = requests.get(search_url, timeout=15).json()
         if not res.get("hits"):
             return jobs
 
-        story_id = res["hits"][0]["objectID"]
-        comments_url = f"https://hn.algolia.com/api/v1/search?tags=comment,story_{story_id}&hitsPerPage=50"
+        story = None
+        for hit in res.get("hits", []):
+            title = hit.get("title", "").lower()
+            if "seeking freelancer" in title or "freelancer?" in title:
+                story = hit
+                break
+
+        if not story:
+            return jobs
+
+        story_id = story["objectID"]
+
+        # Ambil komentar dari thread terbaru tersebut
+        comments_url = f"https://hn.algolia.com/api/v1/search?tags=comment,story_{story_id}&hitsPerPage=100"
         comments_res = requests.get(comments_url, timeout=15).json()
 
         for hit in comments_res.get("hits", []):
             text = html.unescape(hit.get("comment_text", ""))
             clean_text = re.sub(r"<[^>]+>", " ", text).strip()
-            lower = clean_text.lower()
+            upper_text = clean_text.upper()
 
-            if any(kw in lower for kw in KEYWORDS) and any(term in lower for term in ["remote", "contract", "freelance"]):
-                snippet = clean_text[:160].replace("\n", " ") + "..."
+            # Filter: tolak pelamar kerja, terima hanya postingan hiring/klien
+            if "SEEKING WORK" in upper_text:
+                continue
+            if "SEEKING FREELANCER" not in upper_text:
+                continue
+
+            lower = clean_text.lower()
+            if any(kw in lower for kw in KEYWORDS):
+                snippet = clean_text[:180].replace("\n", " ") + "..."
                 comment_id = hit.get("objectID")
                 jobs.append({
                     "source": "HackerNews",
                     "title": snippet,
-                    "company": hit.get("author", "HN User"),
+                    "company": hit.get("author", "HN Client"),
                     "url": f"https://news.ycombinator.com/item?id={comment_id}",
                     "date": hit.get("created_at", "")[:10]
                 })
@@ -148,7 +172,6 @@ def main():
     all_jobs.extend(fetch_wwr())
     all_jobs.extend(fetch_hn_freelance())
 
-    # Filter hanya yang belum pernah dikirim
     new_jobs = [job for job in all_jobs if job["url"] not in seen_urls]
     print(f"[*] Ditemukan {len(all_jobs)} peluang, {len(new_jobs)} listing baru.")
 
@@ -188,7 +211,6 @@ def main():
     for msg in messages:
         send_telegram_message(msg)
 
-    # Simpan update seen_urls agar di-push oleh actions
     save_seen_urls(seen_urls)
     print(f"[✓] Berhasil mengirim {len(messages)} pesan dan update state.")
 
