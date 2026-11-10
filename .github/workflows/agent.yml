@@ -38,6 +38,9 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main
           git add seen_urls.json
-          git diff --staged --quiet || (git commit -m "chore: persist seen_urls state [skip ci]" && git push origin main)
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: persist seen_urls state [skip ci]"
+            git pull --rebase origin main
+            git push origin main
+          fi
