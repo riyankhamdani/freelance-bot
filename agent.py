@@ -43,11 +43,18 @@ PROFILE_KEYWORDS = {
     "AI Infra / SRE": ["ai platform", "dataiku", "mlops", "gpu infrastructure", "platform engineer", "sre", "devops"]
 }
 
-# Wajib term kontrak (hindari 'smart contract' atau 'federal contract')
+# Wajib term kontrak
 CONTRACT_REGEX = re.compile(
     r"(?<!smart\s)(?<!federal\s)(?<!government\s)\b(contract|contractor|freelance|freelancer|b2b|c2c|hourly|retainer|part-time|1099)\b", 
     re.IGNORECASE
 )
+
+
+def normalize_to_str(val) -> str:
+    """Mengubah nilai bertipe list, dict, atau string menjadi string flat lowercase yang aman."""
+    if isinstance(val, list):
+        return " ".join(str(item) for item in val).lower()
+    return str(val or "").lower()
 
 
 def load_seen_urls() -> set:
@@ -98,15 +105,15 @@ def extract_matched_skills(text: str) -> list:
 def is_valid_contract_and_geo(header_or_title: str, full_text: str) -> bool:
     first_block = f"{header_or_title} {full_text[:350]}"
 
-    # 1. Wajib buang semua yang bertuliskan Full-Time
+    # 1. Buang semua format full-time
     if re.search(r"\bfull[\s-]time\b", first_block, re.IGNORECASE):
         return False
 
-    # 2. Cek blacklist lokasi tertutup (US, UK, EU, dll)
+    # 2. Cek blacklist regional tertutup
     if GEO_EXCLUDE_REGEX.search(first_block):
         return False
 
-    # 3. Cek blacklist role
+    # 3. Cek blacklist role bukan infra
     if EXCLUDE_ROLES_REGEX.search(first_block):
         return False
 
@@ -114,7 +121,7 @@ def is_valid_contract_and_geo(header_or_title: str, full_text: str) -> bool:
     if not INFRA_ROLE_REGEX.search(header_or_title) and not INFRA_ROLE_REGEX.search(full_text[:200]):
         return False
 
-    # 5. Wajib ada kata kontrak/freelance murni
+    # 5. Wajib ada term kontrak/freelance murni
     return bool(CONTRACT_REGEX.search(first_block) or CONTRACT_REGEX.search(full_text))
 
 
@@ -138,7 +145,6 @@ def fetch_hn_contracts() -> list:
             for hit in comments_res.get("hits", []):
                 raw_html = hit.get("comment_text", "")
                 text = html.unescape(raw_html)
-                # Ubah tag <p> jadi newline agar baris header tetap terbaca rapi
                 text_with_newlines = re.sub(r"</?p>", "\n", text)
                 clean_text = re.sub(r"<[^>]+>", " ", text_with_newlines).strip()
                 upper = clean_text.upper()
@@ -177,17 +183,15 @@ def fetch_jobicy_contracts() -> list:
         url = "https://jobicy.com/api/v2/remote-jobs?count=50&tag=devops"
         res = requests.get(url, headers=HEADERS, timeout=15).json()
         for item in res.get("jobs", []):
-            job_type = item.get("jobType", "").lower()
-            title = item.get("jobTitle", "")
-            desc = item.get("jobDescription", "")
-            geo = item.get("jobGeo", "").lower()
+            job_type = normalize_to_str(item.get("jobType"))
+            title = str(item.get("jobTitle") or "").strip()
+            desc = str(item.get("jobDescription") or "")
+            geo = normalize_to_str(item.get("jobGeo"))
             header_meta = f"{title} | {geo} | {job_type}"
 
-            # Tolak lowongan full-time
             if "full-time" in job_type or "full time" in job_type:
                 continue
 
-            # Abaikan jika region terkunci dan bukan global/anywhere/worldwide
             if geo and not any(term in geo for term in ["anywhere", "worldwide", "global", "all"]):
                 continue
 
@@ -196,10 +200,10 @@ def fetch_jobicy_contracts() -> list:
                 if matched:
                     jobs.append({
                         "source": "Jobicy (Direct ATS)",
-                        "title": title.strip(),
-                        "company": item.get("companyName", "Tech Company").strip(),
-                        "url": item.get("url"),
-                        "date": item.get("pubDate", "")[:10],
+                        "title": title,
+                        "company": str(item.get("companyName") or "Tech Company").strip(),
+                        "url": str(item.get("url") or ""),
+                        "date": str(item.get("pubDate") or "")[:10],
                         "matches": matched
                     })
     except Exception as e:
