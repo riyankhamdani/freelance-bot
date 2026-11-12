@@ -1,4 +1,4 @@
-name: Freelance Agent
+name: Sniper Agent
 
 on:
   schedule:
@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   run-agent:
@@ -27,14 +28,16 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Freelance Agent
+      - name: Run Sniper Agent
         env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python agent.py
 
       - name: Persist seen_urls state
+        if: success()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -44,3 +47,10 @@ jobs:
             git pull --rebase origin main
             git push origin main
           fi
+
+      - name: Auto-Cleanup Old Workflow Runs
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list --limit 100 --json databaseId -q '.[5:] | .[].databaseId' | xargs -r -n1 gh run delete
