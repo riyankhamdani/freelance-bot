@@ -2,7 +2,7 @@ name: Sniper Agent
 
 on:
   schedule:
-    - cron: '00 9 * * *'
+    - cron: '53 9 * * *'
   workflow_dispatch:
 
 permissions:
